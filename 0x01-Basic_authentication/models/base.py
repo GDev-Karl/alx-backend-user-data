@@ -1,96 +1,139 @@
 #!/usr/bin/env python3
+""" Base module
 """
-Definition of class BasicAuth
-"""
-import base64
-from .auth import Auth
-from typing import TypeVar
-
-from models.user import User
+from datetime import datetime
+from typing import TypeVar, List, Iterable
+from os import path
+import json
+import uuid
 
 
-class BasicAuth(Auth):
-    """ Implement Basic Authorization protocol methods
+TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S"
+DATA = {}
+
+
+class Base():
+    """ Base class
     """
-    def extract_base64_authorization_header(self,
-                                            authorization_header: str) -> str:
-        """
-        Extracts the Base64 part of the Authorization header for a Basic
-        Authorization
-        """
-        if authorization_header is None:
-            return None
-        if not isinstance(authorization_header, str):
-            return None
-        if not authorization_header.startswith("Basic "):
-            return None
-        token = authorization_header.split(" ")[-1]
-        return token
 
-    def decode_base64_authorization_header(self,
-                                           base64_authorization_header:
-                                           str) -> str:
+    def __init__(self, *args: list, **kwargs: dict):
+        """ Initialize a Base instance
         """
-        Decode a Base64-encoded string
-        """
-        if base64_authorization_header is None:
-            return None
-        if not isinstance(base64_authorization_header, str):
-            return None
-        try:
-            decoded = base64_authorization_header.encode('utf-8')
-            decoded = base64.b64decode(decoded)
-            return decoded.decode('utf-8')
-        except Exception:
-            return None
+        s_class = str(self.__class__.__name__)
+        if DATA.get(s_class) is None:
+            DATA[s_class] = {}
 
-    def extract_user_credentials(self,
-                                 decoded_base64_authorization_header:
-                                 str) -> (str, str):
-        """
-        Returns user email and password from Base64 decoded value
-        """
-        if decoded_base64_authorization_header is None:
-            return (None, None)
-        if not isinstance(decoded_base64_authorization_header, str):
-            return (None, None)
-        if ':' not in decoded_base64_authorization_header:
-            return (None, None)
-        email = decoded_base64_authorization_header.split(":")[0]
-        password = decoded_base64_authorization_header[len(email) + 1:]
-        return (email, password)
+        self.id = kwargs.get('id', str(uuid.uuid4()))
+        if kwargs.get('created_at') is not None:
+            self.created_at = datetime.strptime(kwargs.get('created_at'),
+                                                TIMESTAMP_FORMAT)
+        else:
+            self.created_at = datetime.utcnow()
+        if kwargs.get('updated_at') is not None:
+            self.updated_at = datetime.strptime(kwargs.get('updated_at'),
+                                                TIMESTAMP_FORMAT)
+        else:
+            self.updated_at = datetime.utcnow()
 
-    def user_object_from_credentials(self, user_email: str,
-                                     user_pwd: str) -> TypeVar('User'):
+    def __eq__(self, other: TypeVar('Base')) -> bool:
+        """ Equality
         """
-        Return a User instance based on email and password
-        """
-        if user_email is None or not isinstance(user_email, str):
-            return None
-        if user_pwd is None or not isinstance(user_pwd, str):
-            return None
-        try:
-            users = User.search({"email": user_email})
-            if not users or users == []:
-                return None
-            for u in users:
-                if u.is_valid_password(user_pwd):
-                    return u
-            return None
-        except Exception:
-            return None
+        if type(self) != type(other):
+            return False
+        if not isinstance(self, Base):
+            return False
+        return (self.id == other.id)
 
-    def current_user(self, request=None) -> TypeVar('User'):
+    def to_json(self, for_serialization: bool = False) -> dict:
+        """ Convert the object a JSON dictionary
         """
-        Returns a User instance based on a received request
+        result = {}
+        for key, value in self.__dict__.items():
+            if not for_serialization and key[0] == '_':
+                continue
+            if type(value) is datetime:
+                result[key] = value.strftime(TIMESTAMP_FORMAT)
+            else:
+                result[key] = value
+        return result
+
+    @classmethod
+    def load_from_file(cls):
+        """ Load all objects from file
         """
-        Auth_header = self.authorization_header(request)
-        if Auth_header is not None:
-            token = self.extract_base64_authorization_header(Auth_header)
-            if token is not None:
-                decoded = self.decode_base64_authorization_header(token)
-                if decoded is not None:
-                    email, pword = self.extract_user_credentials(decoded)
-                    if email is not None:
-                        return self.user_object_from_credentials(email, pword)
-        return
+        s_class = cls.__name__
+        file_path = ".db_{}.json".format(s_class)
+        DATA[s_class] = {}
+        if not path.exists(file_path):
+            return
+
+        with open(file_path, 'r') as f:
+            objs_json = json.load(f)
+            for obj_id, obj_json in objs_json.items():
+                DATA[s_class][obj_id] = cls(**obj_json)
+
+    @classmethod
+    def save_to_file(cls):
+        """ Save all objects to file
+        """
+        s_class = cls.__name__
+        file_path = ".db_{}.json".format(s_class)
+        objs_json = {}
+        for obj_id, obj in DATA[s_class].items():
+            objs_json[obj_id] = obj.to_json(True)
+
+        with open(file_path, 'w') as f:
+            json.dump(objs_json, f)
+
+    def save(self):
+        """ Save current object
+        """
+        s_class = self.__class__.__name__
+        self.updated_at = datetime.utcnow()
+        DATA[s_class][self.id] = self
+        self.__class__.save_to_file()
+
+    def remove(self):
+        """ Remove object
+        """
+        s_class = self.__class__.__name__
+        if DATA[s_class].get(self.id) is not None:
+            del DATA[s_class][self.id]
+            self.__class__.save_to_file()
+
+    @classmethod
+    def count(cls) -> int:
+        """ Count all objects
+        """
+        s_class = cls.__name__
+        return len(DATA[s_class].keys())
+
+    @classmethod
+    def all(cls) -> Iterable[TypeVar('Base')]:
+        """ Return all objects
+        """
+        return cls.search()
+
+    @classmethod
+    def get(cls, id: str) -> TypeVar('Base'):
+        """ Return one object by ID
+        """
+        s_class = cls.__name__
+        return DATA[s_class].get(id)
+
+    @classmethod
+    def search(cls, attributes: dict = {}) -> List[TypeVar('Base')]:
+        """ Search all objects with matching attributes
+        """
+        s_class = cls.__name__
+        def _search(obj):
+            if len(attributes) == 0:
+                return True
+            for k, v in attributes.items():
+                if (getattr(obj, k) != v):
+                    return False
+            return True
+        
+        return list(filter(_search, DATA[s_class].values()))
+
+    
